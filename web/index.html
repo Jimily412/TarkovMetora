@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TarkovMetora</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="/web/style.css" />
+</head>
+<body>
+  <div id="statusbar">
+    <span id="sb-map">Map: --</span>
+    <span id="sb-eft">EFT: Waiting</span>
+    <span id="sb-sse">SSE: Connecting</span>
+    <span id="sb-shots">Shots: 0</span>
+    <span id="sb-version">TarkovMetora</span>
+  </div>
+
+  <div id="controls">
+    <div class="ctrl-group">
+      <span class="ctrl-label">Layers</span>
+      <label><input type="checkbox" id="layer-extracts" checked> Extracts</label>
+      <label><input type="checkbox" id="layer-bosses"   checked> Bosses</label>
+      <label><input type="checkbox" id="layer-spawns"   checked> Spawns</label>
+      <label><input type="checkbox" id="layer-quests">            Quests</label>
+    </div>
+  </div>
+
+  <div id="map"></div>
+
+  <div id="coord-display"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/web/app.js"></script>
+</body>
+</html>

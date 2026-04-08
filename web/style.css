@@ -1,0 +1,190 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: #0d0d0d;
+  color: #ccc;
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 13px;
+  overflow: hidden;
+}
+
+#statusbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 28px;
+  background: rgba(10, 10, 10, 0.92);
+  border-bottom: 1px solid #2a2a2a;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  gap: 20px;
+  z-index: 1000;
+}
+
+#statusbar span {
+  color: #888;
+  font-size: 12px;
+}
+
+#sb-map   { color: #e2b96a; font-weight: bold; }
+#sb-eft   { color: #666; }
+#sb-eft.ok    { color: #6bcf7f; }
+#sb-eft.error { color: #cf6b6b; }
+#sb-sse   { color: #666; }
+#sb-sse.ok    { color: #6bcf7f; }
+#sb-sse.error { color: #cf6b6b; }
+#sb-shots { color: #7aa2d4; }
+#sb-version { color: #444; margin-left: auto; }
+
+#controls {
+  position: fixed;
+  top: 34px;
+  left: 10px;
+  z-index: 1000;
+  background: rgba(10, 10, 10, 0.85);
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  padding: 8px 12px;
+}
+
+.ctrl-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ctrl-label {
+  color: #555;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 2px;
+}
+
+#controls label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: #aaa;
+  font-size: 12px;
+}
+
+#controls label:hover { color: #ddd; }
+
+#controls input[type="checkbox"] {
+  accent-color: #e2b96a;
+  cursor: pointer;
+}
+
+#map {
+  position: fixed;
+  top: 28px;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: #111;
+}
+
+#coord-display {
+  position: fixed;
+  bottom: 8px;
+  right: 10px;
+  background: rgba(10,10,10,0.85);
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 11px;
+  color: #666;
+  z-index: 1000;
+  min-width: 220px;
+}
+
+/* Leaflet dark theme overrides */
+.leaflet-container {
+  background: #111 !important;
+}
+
+.leaflet-tile-pane {
+  filter: brightness(0.7) contrast(1.1);
+}
+
+.leaflet-control-zoom a {
+  background: #1a1a1a !important;
+  color: #aaa !important;
+  border-color: #333 !important;
+}
+
+.leaflet-control-zoom a:hover {
+  background: #2a2a2a !important;
+  color: #fff !important;
+}
+
+.leaflet-bar {
+  border: 1px solid #333 !important;
+  border-radius: 4px !important;
+}
+
+/* Tooltip / popup styling */
+.leaflet-tooltip {
+  background: rgba(10,10,10,0.9) !important;
+  border: 1px solid #333 !important;
+  color: #ccc !important;
+  font-family: 'Consolas', monospace !important;
+  font-size: 12px !important;
+  border-radius: 3px !important;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.6) !important;
+}
+
+.leaflet-popup-content-wrapper {
+  background: rgba(10,10,10,0.95) !important;
+  border: 1px solid #333 !important;
+  color: #ccc !important;
+  border-radius: 4px !important;
+}
+
+.leaflet-popup-tip {
+  background: #1a1a1a !important;
+}
+
+.leaflet-popup-close-button {
+  color: #888 !important;
+}
+
+/* Player marker arrow */
+.player-arrow {
+  filter: drop-shadow(0 0 4px rgba(255, 200, 50, 0.8));
+}
+
+.squad-arrow {
+  filter: drop-shadow(0 0 4px rgba(100, 180, 255, 0.8));
+}
+
+/* Legend dots */
+.dot-pmc    { color: #4a9eff; }
+.dot-scav   { color: #5ecf5e; }
+.dot-both   { color: #e2b96a; }
+.dot-coop   { color: #c76be2; }
+.dot-boss   { color: #cf4444; }
+.dot-spawn  { color: #555; }
+
+/* No map loaded state */
+#no-map-msg {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: #444;
+  font-size: 16px;
+  text-align: center;
+  pointer-events: none;
+  z-index: 500;
+}
