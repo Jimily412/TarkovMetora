@@ -1,6 +1,6 @@
 # TarkovMetora v1.0.0
-# Real-time Tarkov companion: auto-screenshot key sender + live map in browser
-# All string literals ASCII only. No Clear-Host. No non-ASCII characters.
+# Real-time Tarkov companion: screenshot key sender + live browser map
+# ASCII only. No Clear-Host. No non-ASCII characters anywhere.
 
 param()
 
@@ -13,7 +13,9 @@ $CACHE_DIR  = Join-Path $SCRIPT_DIR "cache"
 $WEB_DIR    = Join-Path $SCRIPT_DIR "web"
 $MAP_CACHE  = Join-Path $CACHE_DIR "mapdata.json"
 
-# ─── P/Invoke type for PostMessage ────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Win32 PostMessage (send key directly to EFT window handle)
+# ---------------------------------------------------------------------------
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -23,9 +25,11 @@ public class Win32PostMsg {
 }
 "@ -ErrorAction Stop
 
-# ─── Logging ──────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
 function Write-Log($msg, $color = "Gray") {
-    $ts  = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $ts   = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $line = "[$ts] $msg"
     try { Add-Content -Path $LOG_FILE -Value $line -Encoding UTF8 -ErrorAction Stop } catch {}
     Write-Host $line -ForegroundColor $color
@@ -41,24 +45,27 @@ function Rotate-Log {
             $lines = Get-Content $LOG_FILE -ErrorAction Stop
             if ($lines.Count -gt 1000) {
                 $lines | Select-Object -Last 800 | Set-Content $LOG_FILE -Encoding UTF8
-                Write-Log "Log rotated to 800 lines." "DarkGray"
             }
         }
     } catch {}
 }
 
-# ─── Key send ─────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Key send - PostMessage to EFT window, never system-wide
+# ---------------------------------------------------------------------------
 $VK_MAP = @{
-    "home"   = 0x24
-    "f1"     = 0x70; "f2" = 0x71; "f3" = 0x72; "f4" = 0x73
-    "f5"     = 0x74; "f6" = 0x75; "f7" = 0x76; "f8" = 0x77
-    "f9"     = 0x78; "f10"= 0x79; "f11"= 0x7A; "f12"= 0x7B
-    "insert" = 0x2D; "delete"= 0x2E; "end"= 0x23; "pageup"= 0x21; "pagedown"= 0x22
+    "home"     = 0x24
+    "insert"   = 0x2D; "delete" = 0x2E; "end" = 0x23
+    "pageup"   = 0x21; "pagedown" = 0x22
+    "f1"=0x70; "f2"=0x71; "f3"=0x72;  "f4"=0x73
+    "f5"=0x74; "f6"=0x75; "f7"=0x76;  "f8"=0x77
+    "f9"=0x78; "f10"=0x79;"f11"=0x7A; "f12"=0x7B
 }
 
 function Send-KeyToEFT($vk) {
     try {
-        $eft = Get-Process -Name "EscapeFromTarkov" -ErrorAction SilentlyContinue | Select-Object -First 1
+        $eft = Get-Process -Name "EscapeFromTarkov" -ErrorAction SilentlyContinue |
+               Select-Object -First 1
         if (-not $eft)                                { return "NoProcess" }
         if ($eft.MainWindowHandle -eq [IntPtr]::Zero) { return "NoHandle"  }
         [Win32PostMsg]::PostMessage($eft.MainWindowHandle, 0x0100, [IntPtr]$vk, [IntPtr]1)          | Out-Null
@@ -71,7 +78,9 @@ function Send-KeyToEFT($vk) {
     }
 }
 
-# ─── Purge ────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Purge - runs unconditionally every loop, no extension filter
+# ---------------------------------------------------------------------------
 function Purge-Old($dir) {
     $count = 0
     try {
@@ -84,14 +93,15 @@ function Purge-Old($dir) {
             }
         }
         if ($count -gt 0) {
-            $remaining = $files.Count - $count
-            Write-Log "Purge: deleted $count file(s). Remaining: $remaining" "DarkGray"
+            Write-Log "Purge: deleted $count file(s). Remaining: $($files.Count - $count)" "DarkGray"
         }
     } catch { Write-LogError "Purge-Old failed" $_ }
     return $count
 }
 
-# ─── Map bounds ───────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Map bounds - used in FSW action via MessageData
+# ---------------------------------------------------------------------------
 $MAP_BOUNDS = @{
     "customs"     = @{ xMin=-500;  xMax=500;  yMin=-50;  yMax=100;  zMin=-500; zMax=500  }
     "woods"       = @{ xMin=-900;  xMax=900;  yMin=-50;  yMax=400;  zMin=-900; zMax=900  }
@@ -105,22 +115,11 @@ $MAP_BOUNDS = @{
     "groundzero"  = @{ xMin=-400;  xMax=400;  yMin=-50;  yMax=150;  zMin=-400; zMax=400  }
 }
 
-function Get-MapFromCoords($x, $y, $z) {
-    foreach ($map in $MAP_BOUNDS.Keys) {
-        $b = $MAP_BOUNDS[$map]
-        if ($x -ge $b.xMin -and $x -le $b.xMax -and
-            $y -ge $b.yMin -and $y -le $b.yMax -and
-            $z -ge $b.zMin -and $z -le $b.zMax) {
-            return $map
-        }
-    }
-    return "unknown"
-}
-
-# ─── Config ───────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
 function Get-DefaultScreenshotDir {
-    $userProfile = [Environment]::GetFolderPath("MyDocuments")
-    return Join-Path $userProfile "Escape from Tarkov\Screenshots"
+    return Join-Path ([Environment]::GetFolderPath("MyDocuments")) "Escape from Tarkov\Screenshots"
 }
 
 function New-Config {
@@ -130,30 +129,29 @@ function New-Config {
 
     $defaultDir = Get-DefaultScreenshotDir
     Write-Host "Screenshot folder (default: $defaultDir):"
-    $dir = Read-Host "  Press Enter to use default, or type path"
+    $dir = Read-Host "  Press Enter to accept, or type a custom path"
     if ([string]::IsNullOrWhiteSpace($dir)) { $dir = $defaultDir }
 
     Write-Host ""
-    Write-Host "Your in-game name (used to label your marker on squad maps):"
+    Write-Host "Your in-game name:"
     $playerName = Read-Host "  Player name"
 
     Write-Host ""
-    Write-Host "Mode - are you hosting the session or joining another player's?"
+    Write-Host "Are you the host, or connecting to another player?"
     Write-Host "  [1] Host (default)"
-    Write-Host "  [2] Client (connect to another player's TarkovMetora)"
+    Write-Host "  [2] Client"
     $modeInput = Read-Host "  Choice"
-    $mode = if ($modeInput -eq "2") { "client" } else { "host" }
-
+    $mode    = if ($modeInput -eq "2") { "client" } else { "host" }
     $hostUrl = ""
     if ($mode -eq "client") {
         Write-Host ""
-        Write-Host "Enter host URL (e.g. http://192.168.1.50:7472):"
-        $hostUrl = Read-Host "  Host URL"
+        Write-Host "Host URL (e.g. http://192.168.1.50:7472):"
+        $hostUrl = Read-Host "  URL"
     }
 
     Write-Host ""
-    Write-Host "HTTP port (default: 7472):"
-    $portInput = Read-Host "  Port (Enter for 7472)"
+    Write-Host "Port (default 7472):"
+    $portInput = Read-Host "  Port"
     $port = if ([string]::IsNullOrWhiteSpace($portInput)) { 7472 } else { [int]$portInput }
 
     $cfg = [ordered]@{
@@ -166,541 +164,393 @@ function New-Config {
         host_url         = $hostUrl
         squad            = @()
     }
-
     $cfg | ConvertTo-Json -Depth 5 | Set-Content $CONFIG_FILE -Encoding UTF8
-    Write-Log "Config saved to $CONFIG_FILE" "Green"
+    Write-Log "Config saved." "Green"
     return $cfg
 }
 
 function Load-Config {
-    if (-not (Test-Path $CONFIG_FILE)) {
-        return New-Config
-    }
+    if (-not (Test-Path $CONFIG_FILE)) { return New-Config }
     try {
-        $raw = Get-Content $CONFIG_FILE -Raw -ErrorAction Stop
-        $cfg = $raw | ConvertFrom-Json
-        # Normalize
-        if ([string]::IsNullOrWhiteSpace($cfg.screenshot_dir)) {
-            $cfg.screenshot_dir = Get-DefaultScreenshotDir
-        }
+        $cfg = (Get-Content $CONFIG_FILE -Raw -ErrorAction Stop) | ConvertFrom-Json
+        if ([string]::IsNullOrWhiteSpace($cfg.screenshot_dir)) { $cfg.screenshot_dir = Get-DefaultScreenshotDir }
         if (-not $cfg.interval_seconds -or $cfg.interval_seconds -lt 1) { $cfg.interval_seconds = 5 }
         if ([string]::IsNullOrWhiteSpace($cfg.screenshot_key))           { $cfg.screenshot_key = "home" }
         if (-not $cfg.port -or $cfg.port -lt 1)                          { $cfg.port = 7472 }
         if ([string]::IsNullOrWhiteSpace($cfg.mode))                     { $cfg.mode = "host" }
         return $cfg
     } catch {
-        Write-LogError "Failed to load config" $_
+        Write-LogError "Config load failed" $_
         return New-Config
     }
 }
 
-# ─── tarkov.dev API cache ─────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# tarkov.dev map data cache
+# ---------------------------------------------------------------------------
 function Get-MapData {
-    $cacheMaxAge = 24 * 3600  # 24 hours in seconds
     $fresh = $false
-
     if (Test-Path $MAP_CACHE) {
         $age = ((Get-Date) - (Get-Item $MAP_CACHE).LastWriteTime).TotalSeconds
-        if ($age -lt $cacheMaxAge) { $fresh = $true }
+        if ($age -lt 86400) { $fresh = $true }
     }
-
     if ($fresh) {
-        Write-Log "Map data cache is fresh - using cached data." "DarkGray"
-        try {
-            return (Get-Content $MAP_CACHE -Raw) | ConvertFrom-Json
-        } catch {
-            Write-LogError "Failed to read map cache" $_
-        }
+        Write-Log "Map cache is fresh." "DarkGray"
+        return
     }
 
     Write-Log "Fetching map data from tarkov.dev..." "Cyan"
-    $query = '{"query":"{ maps { id name normalizedName bosses { boss { name } spawnChance spawnLocations { name chance } } extracts { id name faction position { x y z } } spawns { position { x y z } sides categories } } }"}'
-
+    $q = '{"query":"{ maps { id name normalizedName bosses { boss { name } spawnChance spawnLocations { name chance } } extracts { id name faction position { x y z } } spawns { position { x y z } sides categories } } }"}'
     try {
         $resp = Invoke-RestMethod -Uri "https://api.tarkov.dev/graphql" `
-            -Method Post `
-            -Body $query `
-            -ContentType "application/json" `
-            -TimeoutSec 30 `
-            -ErrorAction Stop
-
+            -Method Post -Body $q -ContentType "application/json" -TimeoutSec 30 -ErrorAction Stop
         if (-not (Test-Path $CACHE_DIR)) { New-Item -ItemType Directory -Path $CACHE_DIR | Out-Null }
         $resp | ConvertTo-Json -Depth 20 | Set-Content $MAP_CACHE -Encoding UTF8
-        Write-Log "Map data cached to $MAP_CACHE" "Green"
-        return $resp
+        Write-Log "Map data cached." "Green"
     } catch {
-        Write-LogError "Failed to fetch map data from tarkov.dev" $_
-        if (Test-Path $MAP_CACHE) {
-            Write-Log "Using stale cache as fallback." "Yellow"
-            try { return (Get-Content $MAP_CACHE -Raw) | ConvertFrom-Json } catch {}
-        }
-        return $null
+        Write-LogError "tarkov.dev fetch failed" $_
+        if (Test-Path $MAP_CACHE) { Write-Log "Using stale cache." "Yellow" }
     }
 }
 
-# ─── State shared between watcher, loop, and HTTP server ─────────────────────
-$script:currentPosition = $null   # { x, y, z, qw, qx, qy, qz, map, ts }
-$script:currentMap      = "unknown"
-$script:inRaid          = $false
-$script:sessionCount    = 0
-$script:squadData       = @{}     # keyed by player name
-$script:sseClients      = [System.Collections.Generic.List[System.Net.HttpListenerResponse]]::new()
-$script:sseClientsLock  = [System.Object]::new()
-$script:mapData         = $null
+# ---------------------------------------------------------------------------
+# Shared state - thread-safe .NET objects passed between runspaces
+# The broadcast queue carries JSON strings to SSE clients.
+# The state dict carries the last known values for API polling.
+# ---------------------------------------------------------------------------
+$broadcastQueue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+$stateDict      = [System.Collections.Concurrent.ConcurrentDictionary[string,string]]::new()
 
-# ─── SSE helpers ──────────────────────────────────────────────────────────────
-function Send-SSE($data) {
-    $json = $data | ConvertTo-Json -Depth 5 -Compress
-    $msg  = "data: $json`n`n"
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($msg)
-
-    $dead = [System.Collections.Generic.List[System.Net.HttpListenerResponse]]::new()
-    [System.Threading.Monitor]::Enter($script:sseClientsLock)
-    try {
-        foreach ($client in $script:sseClients) {
-            try {
-                $client.OutputStream.Write($bytes, 0, $bytes.Length)
-                $client.OutputStream.Flush()
-            } catch {
-                $dead.Add($client)
-            }
-        }
-        foreach ($d in $dead) { $script:sseClients.Remove($d) | Out-Null }
-    } finally {
-        [System.Threading.Monitor]::Exit($script:sseClientsLock)
-    }
+foreach ($kv in @{
+    eftRunning   = "false"
+    inRaid       = "false"
+    map          = "unknown"
+    sessionCount = "0"
+    posJson      = ""
+    playerName   = ""
+    version      = $VERSION
+}.GetEnumerator()) {
+    $stateDict.TryAdd($kv.Key, $kv.Value) | Out-Null
 }
 
-function Broadcast-Position($pos) {
-    $payload = @{
-        type       = "position"
-        player     = $script:cfg.player_name
-        x          = $pos.x
-        y          = $pos.y
-        z          = $pos.z
-        qw         = $pos.qw
-        qx         = $pos.qx
-        qy         = $pos.qy
-        qz         = $pos.qz
-        map        = $pos.map
-        ts         = $pos.ts
-    }
-    Send-SSE $payload
-}
+# ---------------------------------------------------------------------------
+# HTTP server script - runs in background runspace
+# Uses BeginGetContext (non-blocking) so it can also drain the broadcast queue
+# and push SSE messages without blocking on new connections.
+# ---------------------------------------------------------------------------
+$httpScript = {
+    param($listener, $webDir, $cacheDir, $queue, $state)
 
-function Broadcast-Status {
-    $payload = @{
-        type        = "status"
-        eftRunning  = ($script:lastEftState -ne "NoProcess")
-        inRaid      = $script:inRaid
-        map         = $script:currentMap
-        version     = $VERSION
-        sessionCount= $script:sessionCount
-    }
-    Send-SSE $payload
-}
+    $sseClients = [System.Collections.Generic.List[System.Net.HttpListenerResponse]]::new()
 
-# ─── FileSystemWatcher ────────────────────────────────────────────────────────
-function Start-Watcher($dir) {
-    if (-not (Test-Path $dir)) {
-        try { New-Item -ItemType Directory -Path $dir -Force | Out-Null } catch {}
-    }
-
-    $watcher                   = New-Object System.IO.FileSystemWatcher
-    $watcher.Path              = $dir
-    $watcher.Filter            = "*.*"
-    $watcher.NotifyFilter      = [System.IO.NotifyFilters]::FileName
-    $watcher.EnableRaisingEvents = $true
-
-    $action = {
-        $path = $Event.SourceEventArgs.FullPath
-        $name = [System.IO.Path]::GetFileName($path)
-
-        if ($name -match '_(-?[\d]+\.[\d]+), (-?[\d]+\.[\d]+), (-?[\d]+\.[\d]+)_(-?[\d]+\.[\d]+), (-?[\d]+\.[\d]+), (-?[\d]+\.[\d]+), (-?[\d]+\.[\d]+)_') {
-            $x  = [float]$Matches[1]; $y  = [float]$Matches[2]; $z  = [float]$Matches[3]
-            $qw = [float]$Matches[4]; $qx = [float]$Matches[5]; $qy = [float]$Matches[6]; $qz = [float]$Matches[7]
-            $map = Get-MapFromCoords $x $y $z
-
-            $pos = @{ x=$x; y=$y; z=$z; qw=$qw; qx=$qx; qy=$qy; qz=$qz; map=$map; ts=(Get-Date -Format "o") }
-            $script:currentPosition = $pos
-            $script:currentMap      = $map
-            $script:inRaid          = $true
-            $script:sessionCount++
-
-            Broadcast-Position $pos
-
-            try { Remove-Item $path -Force -ErrorAction Stop } catch {}
-        } else {
-            # Non-coordinate file - will be cleaned up by Purge-Old
-            $script:inRaid = $false
+    function Get-Mime($ext) {
+        switch ($ext.ToLower()) {
+            ".html" { "text/html; charset=utf-8" }
+            ".js"   { "application/javascript; charset=utf-8" }
+            ".css"  { "text/css; charset=utf-8" }
+            ".json" { "application/json; charset=utf-8" }
+            ".png"  { "image/png" }
+            ".svg"  { "image/svg+xml" }
+            default { "application/octet-stream" }
         }
     }
 
-    Register-ObjectEvent -InputObject $watcher -EventName "Created" -SourceIdentifier "EFTScreenshot" -Action $action | Out-Null
-    Write-Log "FileSystemWatcher active on: $dir" "Green"
-    return $watcher
-}
-
-# ─── HTTP Server ──────────────────────────────────────────────────────────────
-function Get-MimeType($ext) {
-    switch ($ext.ToLower()) {
-        ".html" { return "text/html; charset=utf-8" }
-        ".js"   { return "application/javascript; charset=utf-8" }
-        ".css"  { return "text/css; charset=utf-8" }
-        ".json" { return "application/json; charset=utf-8" }
-        ".png"  { return "image/png" }
-        ".jpg"  { return "image/jpeg" }
-        ".svg"  { return "image/svg+xml" }
-        default { return "application/octet-stream" }
-    }
-}
-
-function Serve-File($resp, $path) {
-    if (-not (Test-Path $path)) {
-        $resp.StatusCode = 404
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes("Not Found")
-        $resp.ContentLength64 = $bytes.Length
-        $resp.OutputStream.Write($bytes, 0, $bytes.Length)
-        $resp.OutputStream.Close()
-        return
-    }
-    $ext   = [System.IO.Path]::GetExtension($path)
-    $mime  = Get-MimeType $ext
-    $bytes = [System.IO.File]::ReadAllBytes($path)
-    $resp.ContentType     = $mime
-    $resp.ContentLength64 = $bytes.Length
-    $resp.OutputStream.Write($bytes, 0, $bytes.Length)
-    $resp.OutputStream.Close()
-}
-
-function Serve-JSON($resp, $obj) {
-    $json  = $obj | ConvertTo-Json -Depth 10 -Compress
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
-    $resp.ContentType     = "application/json; charset=utf-8"
-    $resp.ContentLength64 = $bytes.Length
-    $resp.OutputStream.Write($bytes, 0, $bytes.Length)
-    $resp.OutputStream.Close()
-}
-
-function Start-HttpServer($port) {
-    $prefix = if ($script:cfg.mode -eq "host") { "http://+:$port/" } else { "http://localhost:$port/" }
-    $listener = New-Object System.Net.HttpListener
-    $listener.Prefixes.Add($prefix)
-    try {
-        $listener.Start()
-        Write-Log "HTTP server listening on $prefix" "Green"
-        Write-Log "Open browser: http://localhost:$port" "Cyan"
-    } catch {
-        Write-LogError "Failed to start HTTP server on port $port" $_
-        Write-Log "Try running as Administrator if port binding fails." "Yellow"
-        return $null
-    }
-    return $listener
-}
-
-function Handle-Request($ctx) {
-    $req  = $ctx.Request
-    $resp = $ctx.Response
-    $url  = $req.Url.AbsolutePath.TrimEnd('/')
-
-    try {
-        # SSE endpoint
-        if ($url -eq "/events") {
-            $resp.ContentType = "text/event-stream"
-            $resp.Headers.Add("Cache-Control", "no-cache")
-            $resp.Headers.Add("Access-Control-Allow-Origin", "*")
-            $resp.SendChunked = $true
-
-            # Send initial state
-            $initBytes = [System.Text.Encoding]::UTF8.GetBytes("data: {`"type`":`"connected`"}`n`n")
-            $resp.OutputStream.Write($initBytes, 0, $initBytes.Length)
-            $resp.OutputStream.Flush()
-
-            [System.Threading.Monitor]::Enter($script:sseClientsLock)
-            try { $script:sseClients.Add($resp) } finally { [System.Threading.Monitor]::Exit($script:sseClientsLock) }
-
-            # Immediately push current state
-            Broadcast-Status
-            if ($script:currentPosition) { Broadcast-Position $script:currentPosition }
-
-            # Do NOT close — keep alive for SSE
-            return
-        }
-
-        # CORS preflight
-        if ($req.HttpMethod -eq "OPTIONS") {
-            $resp.Headers.Add("Access-Control-Allow-Origin", "*")
-            $resp.Headers.Add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            $resp.Headers.Add("Access-Control-Allow-Headers", "Content-Type")
-            $resp.StatusCode = 204
-            $resp.OutputStream.Close()
-            return
-        }
-
-        $resp.Headers.Add("Access-Control-Allow-Origin", "*")
-
-        if ($url -eq "" -or $url -eq "/") {
-            Serve-File $resp (Join-Path $WEB_DIR "index.html")
-            return
-        }
-
-        if ($url -match '^/web/(.+)$') {
-            Serve-File $resp (Join-Path $WEB_DIR $Matches[1])
-            return
-        }
-
-        if ($url -match '^/cache/(.+)$') {
-            Serve-File $resp (Join-Path $CACHE_DIR $Matches[1])
-            return
-        }
-
-        if ($url -eq "/api/status") {
-            Serve-JSON $resp @{
-                eftRunning   = ($script:lastEftState -ne "NoProcess" -and $script:lastEftState -ne "")
-                inRaid       = $script:inRaid
-                map          = $script:currentMap
-                version      = $VERSION
-                sessionCount = $script:sessionCount
-            }
-            return
-        }
-
-        if ($url -eq "/api/position") {
-            if ($script:currentPosition) {
-                Serve-JSON $resp $script:currentPosition
-            } else {
-                Serve-JSON $resp @{ error = "no position data" }
-            }
-            return
-        }
-
-        if ($url -eq "/api/squad") {
-            $results = @()
-            foreach ($member in $script:cfg.squad) {
-                if ([string]::IsNullOrWhiteSpace($member)) { continue }
-                try {
-                    $memberData = Invoke-RestMethod -Uri "$($script:cfg.host_url)/api/position" -TimeoutSec 3 -ErrorAction Stop
-                    $results += $memberData
-                } catch {}
-            }
-            Serve-JSON $resp $results
-            return
-        }
-
-        if ($url -eq "/api/mapdata") {
-            if (Test-Path $MAP_CACHE) {
-                Serve-File $resp $MAP_CACHE
-            } else {
-                Serve-JSON $resp @{ error = "no map data cached" }
-            }
-            return
-        }
-
-        # 404
-        $resp.StatusCode = 404
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes("Not Found: $url")
-        $resp.ContentLength64 = $bytes.Length
-        $resp.OutputStream.Write($bytes, 0, $bytes.Length)
-        $resp.OutputStream.Close()
-
-    } catch {
+    function Send-Bytes($resp, $bytes, $mime) {
         try {
-            $resp.StatusCode = 500
-            $bytes = [System.Text.Encoding]::UTF8.GetBytes("Server Error")
+            $resp.ContentType     = $mime
             $resp.ContentLength64 = $bytes.Length
             $resp.OutputStream.Write($bytes, 0, $bytes.Length)
             $resp.OutputStream.Close()
         } catch {}
     }
+
+    function Send-Text($resp, $text, $mime) {
+        Send-Bytes $resp ([System.Text.Encoding]::UTF8.GetBytes($text)) $mime
+    }
+
+    function Send-File($resp, $path) {
+        if (-not (Test-Path $path)) {
+            Send-Text $resp "Not Found" "text/plain"
+            $resp.StatusCode = 404
+            return
+        }
+        $ext  = [System.IO.Path]::GetExtension($path)
+        $data = [System.IO.File]::ReadAllBytes($path)
+        Send-Bytes $resp $data (Get-Mime $ext)
+    }
+
+    function Build-StatusJson($s) {
+        return "{`"type`":`"status`",`"eftRunning`":$($s['eftRunning']),`"inRaid`":$($s['inRaid']),`"map`":`"$($s['map'])`",`"version`":`"$($s['version'])`",`"sessionCount`":$($s['sessionCount']),`"playerName`":`"$($s['playerName'])`"}"
+    }
+
+    function Handle-SSE($resp) {
+        $resp.ContentType = "text/event-stream"
+        $resp.Headers.Add("Cache-Control", "no-cache")
+        $resp.Headers.Add("X-Accel-Buffering", "no")
+        $resp.SendChunked = $true
+
+        # Flush initial connection frame
+        $init = [System.Text.Encoding]::UTF8.GetBytes("data: {`"type`":`"connected`"}`n`n")
+        try {
+            $resp.OutputStream.Write($init, 0, $init.Length)
+            $resp.OutputStream.Flush()
+        } catch { return }
+
+        $sseClients.Add($resp)
+
+        # Push current state immediately to new subscriber
+        $statusBytes = [System.Text.Encoding]::UTF8.GetBytes("data: $(Build-StatusJson $state)`n`n")
+        try {
+            $resp.OutputStream.Write($statusBytes, 0, $statusBytes.Length)
+            $resp.OutputStream.Flush()
+        } catch {}
+
+        $posJson = $state["posJson"]
+        if ($posJson -and $posJson.Length -gt 0) {
+            $posBytes = [System.Text.Encoding]::UTF8.GetBytes("data: $posJson`n`n")
+            try {
+                $resp.OutputStream.Write($posBytes, 0, $posBytes.Length)
+                $resp.OutputStream.Flush()
+            } catch {}
+        }
+    }
+
+    function Handle-Request($ctx) {
+        $req  = $ctx.Request
+        $resp = $ctx.Response
+        $url  = $req.Url.AbsolutePath
+
+        $resp.Headers.Add("Access-Control-Allow-Origin", "*")
+        $resp.Headers.Add("Access-Control-Allow-Methods", "GET, OPTIONS")
+        $resp.Headers.Add("Access-Control-Allow-Headers", "Content-Type")
+
+        if ($req.HttpMethod -eq "OPTIONS") { $resp.StatusCode = 204; $resp.OutputStream.Close(); return }
+
+        switch -Regex ($url) {
+            '^/events$' {
+                Handle-SSE $resp
+                # Do NOT close - kept alive for SSE push
+            }
+            '^/$|^$' {
+                Send-File $resp (Join-Path $webDir "index.html")
+            }
+            '^/web/(.+)$' {
+                Send-File $resp (Join-Path $webDir $Matches[1])
+            }
+            '^/cache/(.+)$' {
+                Send-File $resp (Join-Path $cacheDir $Matches[1])
+            }
+            '^/api/status$' {
+                $j = "{`"eftRunning`":$($state['eftRunning']),`"inRaid`":$($state['inRaid']),`"map`":`"$($state['map'])`",`"version`":`"$($state['version'])`",`"sessionCount`":$($state['sessionCount']),`"playerName`":`"$($state['playerName'])`"}"
+                Send-Text $resp $j "application/json; charset=utf-8"
+            }
+            '^/api/position$' {
+                $p = $state["posJson"]
+                Send-Text $resp (if ($p -and $p.Length -gt 0) { $p } else { '{"error":"no position yet"}' }) "application/json; charset=utf-8"
+            }
+            '^/api/mapdata$' {
+                $mp = Join-Path $cacheDir "mapdata.json"
+                if (Test-Path $mp) { Send-File $resp $mp }
+                else { Send-Text $resp '{"error":"no map data"}' "application/json; charset=utf-8" }
+            }
+            default {
+                $resp.StatusCode = 404
+                Send-Text $resp "Not Found" "text/plain"
+            }
+        }
+    }
+
+    # Main HTTP loop - BeginGetContext allows non-blocking accept
+    # so we can also drain the broadcast queue between connections.
+    $ar = $listener.BeginGetContext($null, $null)
+
+    while ($listener.IsListening) {
+        # Wait up to 50ms for a new connection
+        if ($ar.AsyncWaitHandle.WaitOne(50)) {
+            try {
+                $ctx = $listener.EndGetContext($ar)
+                Handle-Request $ctx
+            } catch {}
+            try { $ar = $listener.BeginGetContext($null, $null) } catch { break }
+        }
+
+        # Drain broadcast queue - send to all live SSE clients
+        $msg  = $null
+        $dead = $null
+        while ($queue.TryDequeue([ref]$msg)) {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes("data: $msg`n`n")
+            foreach ($client in $sseClients) {
+                try {
+                    $client.OutputStream.Write($bytes, 0, $bytes.Length)
+                    $client.OutputStream.Flush()
+                } catch {
+                    if ($null -eq $dead) { $dead = [System.Collections.Generic.List[object]]::new() }
+                    $dead.Add($client)
+                }
+            }
+        }
+        if ($null -ne $dead) {
+            foreach ($d in $dead) { $sseClients.Remove($d) | Out-Null }
+        }
+    }
 }
 
-# ─── HTTP listener loop (runs in runspace) ────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Start HTTP listener - tries localhost (no admin needed)
+# If host mode, also tries all-interfaces binding (needs admin or netsh reservation)
+# ---------------------------------------------------------------------------
+function Start-HttpServer($port, $mode) {
+    $prefixes = @("http://localhost:$port/")
+    if ($mode -eq "host") {
+        # All-interface bind for squad sharing; falls back to localhost if no rights
+        $prefixes = @("http://+:$port/", "http://localhost:$port/")
+    }
+
+    foreach ($prefix in $prefixes) {
+        $l = New-Object System.Net.HttpListener
+        $l.Prefixes.Add($prefix)
+        try {
+            $l.Start()
+            Write-Log "HTTP server: $prefix" "Green"
+            return $l
+        } catch {
+            Write-Log "Cannot bind $prefix (need admin for + binding) - trying localhost." "Yellow"
+        }
+    }
+    return $null
+}
+
 function Start-HttpLoop($listener) {
     $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
     $rs.Open()
-
-    # Share state variables with the runspace
-    $rs.SessionStateProxy.SetVariable("script_sseClients",    $script:sseClients)
-    $rs.SessionStateProxy.SetVariable("script_sseClientsLock",$script:sseClientsLock)
-    $rs.SessionStateProxy.SetVariable("WEB_DIR",  $WEB_DIR)
-    $rs.SessionStateProxy.SetVariable("CACHE_DIR",$CACHE_DIR)
-    $rs.SessionStateProxy.SetVariable("VERSION",  $VERSION)
-    $rs.SessionStateProxy.SetVariable("listener", $listener)
-
     $ps = [System.Management.Automation.PowerShell]::Create()
     $ps.Runspace = $rs
-
-    # Pass functions and shared refs via a script block that references $using:
-    # Because we can't easily share all state, we use a simpler design:
-    # The HTTP loop in the runspace handles static files and calls back via thread-safe queues.
-    # For simplicity and reliability, we use the main thread's listener via BeginGetContext.
-
-    $ps.AddScript({
-        param($listener, $webDir, $cacheDir, $version, $sseClients, $sseClientsLock)
-
-        function Get-MimeType2($ext) {
-            switch ($ext.ToLower()) {
-                ".html" { return "text/html; charset=utf-8" }
-                ".js"   { return "application/javascript; charset=utf-8" }
-                ".css"  { return "text/css; charset=utf-8" }
-                ".json" { return "application/json; charset=utf-8" }
-                ".png"  { return "image/png" }
-                ".svg"  { return "image/svg+xml" }
-                default { return "application/octet-stream" }
-            }
-        }
-
-        while ($listener.IsListening) {
-            try {
-                $ctx  = $listener.GetContext()
-                $req  = $ctx.Request
-                $resp = $ctx.Response
-                $url  = $req.Url.AbsolutePath.TrimEnd('/')
-
-                $resp.Headers.Add("Access-Control-Allow-Origin", "*")
-
-                if ($url -eq "/events") {
-                    $resp.ContentType = "text/event-stream"
-                    $resp.Headers.Add("Cache-Control", "no-cache")
-                    $resp.SendChunked = $true
-                    $initBytes = [System.Text.Encoding]::UTF8.GetBytes("data: {`"type`":`"connected`"}`n`n")
-                    $resp.OutputStream.Write($initBytes, 0, $initBytes.Length)
-                    $resp.OutputStream.Flush()
-                    [System.Threading.Monitor]::Enter($sseClientsLock)
-                    try { $sseClients.Add($resp) } finally { [System.Threading.Monitor]::Exit($sseClientsLock) }
-                    continue
-                }
-
-                $sendFile = {
-                    param($r, $p)
-                    if (-not (Test-Path $p)) {
-                        $r.StatusCode = 404
-                        $b = [System.Text.Encoding]::UTF8.GetBytes("Not Found")
-                        $r.ContentLength64 = $b.Length
-                        $r.OutputStream.Write($b, 0, $b.Length)
-                        $r.OutputStream.Close(); return
-                    }
-                    $ext  = [System.IO.Path]::GetExtension($p)
-                    $mime = Get-MimeType2 $ext
-                    $b = [System.IO.File]::ReadAllBytes($p)
-                    $r.ContentType     = $mime
-                    $r.ContentLength64 = $b.Length
-                    $r.OutputStream.Write($b, 0, $b.Length)
-                    $r.OutputStream.Close()
-                }
-
-                $sendJson = {
-                    param($r, $obj)
-                    $j = $obj | ConvertTo-Json -Depth 10 -Compress
-                    $b = [System.Text.Encoding]::UTF8.GetBytes($j)
-                    $r.ContentType     = "application/json; charset=utf-8"
-                    $r.ContentLength64 = $b.Length
-                    $r.OutputStream.Write($b, 0, $b.Length)
-                    $r.OutputStream.Close()
-                }
-
-                switch -Regex ($url) {
-                    '^/?$' {
-                        & $sendFile $resp (Join-Path $webDir "index.html")
-                    }
-                    '^/web/(.+)$' {
-                        & $sendFile $resp (Join-Path $webDir $Matches[1])
-                    }
-                    '^/cache/(.+)$' {
-                        & $sendFile $resp (Join-Path $cacheDir $Matches[1])
-                    }
-                    '^/api/status$' {
-                        # Status is pushed via SSE; polling fallback returns last known
-                        & $sendJson $resp @{ version=$version; note="use SSE /events for live data" }
-                    }
-                    '^/api/mapdata$' {
-                        $mp = Join-Path $cacheDir "mapdata.json"
-                        if (Test-Path $mp) { & $sendFile $resp $mp }
-                        else { & $sendJson $resp @{ error="no map data" } }
-                    }
-                    default {
-                        $resp.StatusCode = 404
-                        $b = [System.Text.Encoding]::UTF8.GetBytes("Not Found")
-                        $resp.ContentLength64 = $b.Length
-                        $resp.OutputStream.Write($b, 0, $b.Length)
-                        $resp.OutputStream.Close()
-                    }
-                }
-            } catch [System.Net.HttpListenerException] {
-                break
-            } catch {
-                try { $ctx.Response.OutputStream.Close() } catch {}
-            }
-        }
-    }) | Out-Null
-
-    $ps.AddArgument($listener) | Out-Null
-    $ps.AddArgument($WEB_DIR)  | Out-Null
-    $ps.AddArgument($CACHE_DIR)| Out-Null
-    $ps.AddArgument($VERSION)  | Out-Null
-    $ps.AddArgument($script:sseClients) | Out-Null
-    $ps.AddArgument($script:sseClientsLock) | Out-Null
-
+    $ps.AddScript($httpScript)     | Out-Null
+    $ps.AddArgument($listener)     | Out-Null
+    $ps.AddArgument($WEB_DIR)      | Out-Null
+    $ps.AddArgument($CACHE_DIR)    | Out-Null
+    $ps.AddArgument($broadcastQueue) | Out-Null
+    $ps.AddArgument($stateDict)    | Out-Null
     $handle = $ps.BeginInvoke()
-    return @{ ps=$ps; rs=$rs; handle=$handle }
+    return @{ ps = $ps; rs = $rs; handle = $handle }
 }
 
-# ─── Client mode: forward own position to host ────────────────────────────────
-function Push-PositionToHost($pos) {
-    if ($script:cfg.mode -ne "client") { return }
-    if ([string]::IsNullOrWhiteSpace($script:cfg.host_url)) { return }
-    try {
-        $body = @{
-            player = $script:cfg.player_name
-            x=$pos.x; y=$pos.y; z=$pos.z
-            qw=$pos.qw; qx=$pos.qx; qy=$pos.qy; qz=$pos.qz
-            map=$pos.map; ts=$pos.ts
-        } | ConvertTo-Json -Compress
-        Invoke-RestMethod -Uri "$($script:cfg.host_url)/api/squad/update" `
-            -Method Post -Body $body -ContentType "application/json" -TimeoutSec 3 -ErrorAction SilentlyContinue | Out-Null
-    } catch {}
+# ---------------------------------------------------------------------------
+# FileSystemWatcher action
+# IMPORTANT: runs in a separate thread - cannot call main-scope functions.
+# All shared data passed via -MessageData. Map bounds lookup done inline.
+# ---------------------------------------------------------------------------
+$watcherAction = {
+    $md   = $Event.MessageData
+    $path = $Event.SourceEventArgs.FullPath
+    $name = [System.IO.Path]::GetFileName($path)
+
+    $coordRx = '_(-?[\d]+\.[\d]+), (-?[\d]+\.[\d]+), (-?[\d]+\.[\d]+)_(-?[\d]+\.[\d]+), (-?[\d]+\.[\d]+), (-?[\d]+\.[\d]+), (-?[\d]+\.[\d]+)_'
+
+    if ($name -match $coordRx) {
+        $x  = [float]$Matches[1]; $y  = [float]$Matches[2]; $z  = [float]$Matches[3]
+        $qw = [float]$Matches[4]; $qx = [float]$Matches[5]; $qy = [float]$Matches[6]; $qz = [float]$Matches[7]
+
+        # Map detection - inline, no external function call
+        $detectedMap = "unknown"
+        foreach ($mapName in $md.MapBounds.Keys) {
+            $b = $md.MapBounds[$mapName]
+            if ($x -ge $b.xMin -and $x -le $b.xMax -and
+                $y -ge $b.yMin -and $y -le $b.yMax -and
+                $z -ge $b.zMin -and $z -le $b.zMax) {
+                $detectedMap = $mapName
+                break
+            }
+        }
+
+        $ts         = [datetime]::UtcNow.ToString("o")
+        $playerName = $md.State["playerName"]
+        $count      = [int]$md.State["sessionCount"] + 1
+
+        $posJson = "{`"type`":`"position`",`"player`":`"$playerName`",`"x`":$x,`"y`":$y,`"z`":$z,`"qw`":$qw,`"qx`":$qx,`"qy`":$qy,`"qz`":$qz,`"map`":`"$detectedMap`",`"ts`":`"$ts`"}"
+
+        $md.State["inRaid"]       = "true"
+        $md.State["map"]          = $detectedMap
+        $md.State["sessionCount"] = "$count"
+        $md.State["posJson"]      = $posJson
+
+        $md.Queue.Enqueue($posJson)
+
+        try { Remove-Item $path -Force -ErrorAction Stop } catch {}
+    } else {
+        $md.State["inRaid"] = "false"
+        # Non-coordinate file - will be deleted by Purge-Old after 30s
+    }
 }
 
-# ─── Startup ──────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Startup
+# ---------------------------------------------------------------------------
 Rotate-Log
 Write-Log "=== $APP_NAME v$VERSION starting ===" "Cyan"
 
-$script:cfg = Load-Config
+$cfg = Load-Config
+$stateDict["playerName"] = $cfg.player_name
 
 if (-not (Test-Path $CACHE_DIR)) { New-Item -ItemType Directory -Path $CACHE_DIR -Force | Out-Null }
 if (-not (Test-Path $WEB_DIR))   { New-Item -ItemType Directory -Path $WEB_DIR   -Force | Out-Null }
 
-# Resolve VK code
-$vk = $VK_MAP[$script:cfg.screenshot_key.ToLower()]
+$vk = $VK_MAP[$cfg.screenshot_key.ToLower()]
 if (-not $vk) {
-    Write-Log "Unknown screenshot_key '$($script:cfg.screenshot_key)' - defaulting to home (0x24)" "Yellow"
+    Write-Log "Unknown key '$($cfg.screenshot_key)' - defaulting to Home (0x24)." "Yellow"
     $vk = 0x24
 }
-Write-Log "Screenshot key: $($script:cfg.screenshot_key) (VK 0x$($vk.ToString('X2')))" "Gray"
-Write-Log "Screenshot dir: $($script:cfg.screenshot_dir)" "Gray"
-Write-Log "Interval: $($script:cfg.interval_seconds)s" "Gray"
-Write-Log "Mode: $($script:cfg.mode)" "Gray"
 
-# Fetch map data in background
-$script:mapData = Get-MapData
+Write-Log "Key:      $($cfg.screenshot_key) (VK 0x$($vk.ToString('X2')))" "Gray"
+Write-Log "Shots at: $($cfg.screenshot_dir)" "Gray"
+Write-Log "Interval: $($cfg.interval_seconds)s" "Gray"
+Write-Log "Mode:     $($cfg.mode)" "Gray"
+Write-Log "Player:   $($cfg.player_name)" "Gray"
 
-# Start FileSystemWatcher
-$watcher = Start-Watcher $script:cfg.screenshot_dir
+# Fetch map overlay data
+Get-MapData
 
-# Start HTTP server
-$listener = Start-HttpServer $script:cfg.port
-if ($listener) {
-    $httpJob = Start-HttpLoop $listener
+# Ensure screenshot directory exists (EFT creates it on first screenshot, but watch it now)
+if (-not (Test-Path $cfg.screenshot_dir)) {
+    try { New-Item -ItemType Directory -Path $cfg.screenshot_dir -Force | Out-Null }
+    catch { Write-Log "Could not create screenshot dir - EFT will create it on first shot." "Yellow" }
 }
 
-Write-Log "Press SPACE to pause/resume. Press CTRL+C to exit." "Yellow"
+# FileSystemWatcher
+$watcher = New-Object System.IO.FileSystemWatcher
+$watcher.Path              = $cfg.screenshot_dir
+$watcher.Filter            = "*.*"
+$watcher.NotifyFilter      = [System.IO.NotifyFilters]::FileName
+$watcher.EnableRaisingEvents = $true
+
+Register-ObjectEvent -InputObject $watcher -EventName "Created" `
+    -SourceIdentifier "EFTScreenshot" -Action $watcherAction `
+    -MessageData @{
+        Queue     = $broadcastQueue
+        State     = $stateDict
+        MapBounds = $MAP_BOUNDS
+    } | Out-Null
+
+Write-Log "FileSystemWatcher active on: $($cfg.screenshot_dir)" "Green"
+
+# HTTP server
+$listener = Start-HttpServer $cfg.port $cfg.mode
+if ($listener) {
+    $httpJob = Start-HttpLoop $listener
+    Write-Log "Open browser: http://localhost:$($cfg.port)" "Cyan"
+} else {
+    Write-Log "HTTP server failed to start. Browser map will not work." "Red"
+}
+
+Write-Log "Press SPACE to pause/resume. Ctrl+C to exit." "Yellow"
 Write-Log "" "Gray"
 
-# ─── Main loop ────────────────────────────────────────────────────────────────
-$loopCount     = 0
-$lastEftState  = ""
-$script:lastEftState = ""
-$paused        = $false
+# ---------------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------------
+$loopCount    = 0
+$lastEftState = ""
+$paused       = $false
 
 try {
     while ($true) {
@@ -709,42 +559,41 @@ try {
 
         if ($loopCount % 10 -eq 0) { Rotate-Log }
 
-        # Check for spacebar pause
         if ([Console]::KeyAvailable) {
             $k = [Console]::ReadKey($true)
             if ($k.Key -eq [ConsoleKey]::Spacebar) {
                 $paused = -not $paused
-                Write-Log $(if ($paused) { "PAUSED." } else { "RESUMED." }) "Yellow"
-                Broadcast-Status
+                Write-Log (if ($paused) { "PAUSED." } else { "RESUMED." }) "Yellow"
             }
         }
 
         if (-not $paused) {
             # Purge always first, always unconditional
-            Purge-Old $script:cfg.screenshot_dir
+            Purge-Old $cfg.screenshot_dir
 
             $keyResult = Send-KeyToEFT $vk
-            $script:lastEftState = $keyResult
 
+            # Update shared state for HTTP polling
+            $stateDict["eftRunning"] = if ($keyResult -ne "NoProcess") { "true" } else { "false" }
+            $stateDict["inRaid"]     = if ($keyResult -eq "Sent" -and $stateDict["inRaid"] -eq "true") { "true" } else { $stateDict["inRaid"] }
+
+            # Log and broadcast only when EFT state changes
             if ($keyResult -ne $lastEftState) {
                 switch ($keyResult) {
                     "NoProcess" { Write-Log "EFT not running." "DarkGray" }
-                    "NoHandle"  { Write-Log "EFT found but no window handle - loading screen?" "DarkGray" }
+                    "NoHandle"  { Write-Log "EFT loading screen (no window handle)." "DarkGray" }
                     "Sent"      { Write-Log "Key sent to EFT." "DarkGray" }
                     "Error"     { Write-Log "Key send error." "Red" }
                 }
                 $lastEftState = $keyResult
-                Broadcast-Status
-            }
 
-            # Process any pending PowerShell events from the watcher
-            Get-Event -SourceIdentifier "EFTScreenshot" -ErrorAction SilentlyContinue | ForEach-Object {
-                Remove-Event -EventIdentifier $_.EventIdentifier -ErrorAction SilentlyContinue
+                $sj = "{`"type`":`"status`",`"eftRunning`":$($stateDict['eftRunning']),`"inRaid`":$($stateDict['inRaid']),`"map`":`"$($stateDict['map'])`",`"version`":`"$VERSION`",`"sessionCount`":$($stateDict['sessionCount'])}"
+                $broadcastQueue.Enqueue($sj)
             }
         }
 
         $elapsed = ((Get-Date) - $loopStart).TotalSeconds
-        $wait    = $script:cfg.interval_seconds - $elapsed
+        $wait    = $cfg.interval_seconds - $elapsed
         if ($wait -gt 0) { Start-Sleep -Seconds $wait }
     }
 } finally {

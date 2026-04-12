@@ -1,11 +1,12 @@
-// TarkovMetora - Frontend App
-// All communication via SSE from backend. Leaflet for map rendering.
+// TarkovMetora v1.0.0 - Frontend
+// Receives real-time position via SSE. Renders on Leaflet Simple CRS map.
 
-(function() {
+(function () {
 'use strict';
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-
+// ---------------------------------------------------------------------------
+// Map display names and world-space bounds (mirrors backend MAP_BOUNDS)
+// ---------------------------------------------------------------------------
 var MAP_NAMES = {
     customs:     'Customs',
     woods:       'Woods',
@@ -20,8 +21,6 @@ var MAP_NAMES = {
     unknown:     'Unknown'
 };
 
-// Approximate Unity world coordinate bounds per map (mirrors backend)
-// Used to set the Leaflet CRS bounds for coordinate->pixel conversion
 var MAP_BOUNDS = {
     customs:     { xMin:-500,  xMax:500,  zMin:-500, zMax:500  },
     woods:       { xMin:-900,  xMax:900,  zMin:-900, zMax:900  },
@@ -36,376 +35,280 @@ var MAP_BOUNDS = {
 };
 
 var FACTION_COLOR = {
-    PMC:    '#4a9eff',
-    SCAV:   '#5ecf5e',
-    SHARED: '#e2b96a',
-    All:    '#e2b96a',
+    PMC:            '#4a9eff',
+    Pmc:            '#4a9eff',
+    SCAV:           '#5ecf5e',
+    Scav:           '#5ecf5e',
+    SHARED:         '#e2b96a',
+    All:            '#e2b96a',
+    SharedWithScav: '#e2b96a',
     CoopExtraction: '#c76be2'
 };
 
-var SQUAD_COLORS = ['#4a9eff','#ef6bca','#6befb8','#ef9d6b','#b86bef','#efef6b'];
+var SQUAD_COLORS = ['#4a9eff', '#ef6bca', '#6befb8', '#ef9d6b', '#b86bef', '#efef6b'];
 
-// ── State ─────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+var myPlayerName  = '';
+var currentMap    = null;
+var mapData       = null;
+var myMarker      = null;
+var squadMarkers  = {};
+var squadColorIdx = {};
 
-var state = {
-    currentMap:    null,
-    mapData:       null,
-    myPosition:    null,
-    squadPositions:{},
-    eftRunning:    false,
-    inRaid:        false,
-    sessionCount:  0,
-    layers: {
-        extracts: true,
-        bosses:   true,
-        spawns:   true,
-        quests:   false
-    }
-};
+var layerState = { extracts: true, bosses: true, spawns: true, quests: false };
+try {
+    var saved = JSON.parse(localStorage.getItem('tm_layers') || '{}');
+    Object.keys(saved).forEach(function (k) { if (k in layerState) layerState[k] = saved[k]; });
+} catch (e) {}
 
-// Persist layer prefs
-(function loadPrefs() {
-    try {
-        var saved = JSON.parse(localStorage.getItem('tm_layers') || '{}');
-        Object.keys(saved).forEach(function(k) {
-            if (k in state.layers) state.layers[k] = saved[k];
-        });
-    } catch(e) {}
-})();
-
-function savePrefs() {
-    try { localStorage.setItem('tm_layers', JSON.stringify(state.layers)); } catch(e) {}
+function saveLayerPrefs() {
+    try { localStorage.setItem('tm_layers', JSON.stringify(layerState)); } catch (e) {}
 }
 
-// ── Map setup ─────────────────────────────────────────────────────────────────
-
+// ---------------------------------------------------------------------------
+// Leaflet map (Simple CRS - no tiles, pure coordinate plane)
+// ---------------------------------------------------------------------------
 var map = L.map('map', {
-    crs:           L.CRS.Simple,
-    minZoom:       -3,
-    maxZoom:       4,
-    zoomControl:   true,
+    crs:              L.CRS.Simple,
+    minZoom:          -4,
+    maxZoom:          4,
+    zoomControl:      true,
     attributionControl: false
 });
 
-// Layer groups
 var lg = {
-    base:     L.layerGroup().addTo(map),
-    extracts: L.layerGroup().addTo(map),
-    bosses:   L.layerGroup().addTo(map),
-    spawns:   L.layerGroup().addTo(map),
-    quests:   L.layerGroup(),   // not added by default
-    players:  L.layerGroup().addTo(map)
+    base:    L.layerGroup().addTo(map),
+    extracts:L.layerGroup().addTo(map),
+    bosses:  L.layerGroup().addTo(map),
+    spawns:  L.layerGroup().addTo(map),
+    quests:  L.layerGroup(),
+    players: L.layerGroup().addTo(map)
 };
 
-var noMapMsg = document.createElement('div');
-noMapMsg.id = 'no-map-msg';
-noMapMsg.innerHTML = 'Waiting for position data...<br>Load into a raid in EFT.';
-document.body.appendChild(noMapMsg);
+map.setView([0, 0], 0);
 
-// ── Coordinate conversion ─────────────────────────────────────────────────────
-// Convert Unity world coords (x, z) to Leaflet LatLng.
-// Leaflet Simple CRS: y = lat (vertical), x = lng (horizontal)
-// Unity X -> Leaflet lng, Unity Z -> Leaflet lat
-function worldToLatLng(wx, wz) {
-    return L.latLng(wz, wx);
-}
+// ---------------------------------------------------------------------------
+// Coordinate helpers
+// Unity world X -> Leaflet lng, Unity world Z -> Leaflet lat
+// ---------------------------------------------------------------------------
+function w2ll(wx, wz) { return L.latLng(wz, wx); }
 
-// ── Quaternion -> yaw (radians) ───────────────────────────────────────────────
-function quatToYawDeg(qw, qx, qy, qz) {
-    // Yaw around Unity Y-axis
-    var yaw = Math.atan2(2*(qw*qy + qx*qz), 1 - 2*(qy*qy + qz*qz));
+function quatYawDeg(qw, qx, qy, qz) {
+    var yaw = Math.atan2(2 * (qw * qy + qx * qz), 1 - 2 * (qy * qy + qz * qz));
     return yaw * (180 / Math.PI);
 }
 
-// ── Arrow SVG icon ─────────────────────────────────────────────────────────────
-function makeArrowIcon(color, rotDeg, size) {
-    size = size || 32;
-    var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + size + '" height="' + size + '" viewBox="0 0 32 32">' +
+function arrowIcon(color, rotDeg, sz) {
+    sz = sz || 32;
+    var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + sz + '" height="' + sz + '" viewBox="0 0 32 32">' +
         '<g transform="rotate(' + rotDeg + ' 16 16)">' +
-        '<polygon points="16,4 22,24 16,20 10,24" fill="' + color + '" stroke="#000" stroke-width="1.5"/>' +
+        '<polygon points="16,3 23,26 16,21 9,26" fill="' + color + '" stroke="#000" stroke-width="1.5" stroke-linejoin="round"/>' +
         '</g></svg>';
     return L.divIcon({
-        html: '<div style="transform:none">' + svg + '</div>',
-        iconSize:   [size, size],
-        iconAnchor: [size/2, size/2],
-        className:  ''
+        html:      svg,
+        iconSize:  [sz, sz],
+        iconAnchor:[sz / 2, sz / 2],
+        className: ''
     });
 }
 
-// ── Player markers ─────────────────────────────────────────────────────────────
-
-var myMarker    = null;
-var squadMarkers= {};
-
+// ---------------------------------------------------------------------------
+// Player markers
+// ---------------------------------------------------------------------------
 function updateMyMarker(pos) {
-    var latlng = worldToLatLng(pos.x, pos.z);
-    var yaw    = quatToYawDeg(pos.qw, pos.qx, pos.qy, pos.qz);
-    var icon   = makeArrowIcon('#f5c842', yaw, 32);
+    var ll  = w2ll(pos.x, pos.z);
+    var yaw = quatYawDeg(pos.qw, pos.qx, pos.qy, pos.qz);
+    var ico = arrowIcon('#f5c842', yaw, 34);
 
     if (!myMarker) {
-        myMarker = L.marker(latlng, { icon: icon, zIndexOffset: 1000 })
-            .bindTooltip('You', { permanent: true, direction: 'right', offset: [10, 0] })
+        myMarker = L.marker(ll, { icon: ico, zIndexOffset: 1000 })
+            .bindTooltip(myPlayerName || 'You', { permanent: true, direction: 'right', offset: [14, 0] })
             .addTo(lg.players);
     } else {
-        myMarker.setLatLng(latlng);
-        myMarker.setIcon(icon);
+        myMarker.setLatLng(ll).setIcon(ico);
     }
 
-    // Update coord display
     document.getElementById('coord-display').textContent =
-        'X: ' + pos.x.toFixed(2) + '  Y: ' + pos.y.toFixed(2) + '  Z: ' + pos.z.toFixed(2);
+        'X: ' + pos.x.toFixed(2) + '   Y: ' + pos.y.toFixed(2) + '   Z: ' + pos.z.toFixed(2);
 }
 
-function updateSquadMarker(player, pos, colorIndex) {
-    var latlng = worldToLatLng(pos.x, pos.z);
-    var yaw    = quatToYawDeg(pos.qw, pos.qx, pos.qy, pos.qz);
-    var color  = SQUAD_COLORS[colorIndex % SQUAD_COLORS.length];
-    var icon   = makeArrowIcon(color, yaw, 28);
+function updateSquadMarker(player, pos) {
+    if (!(player in squadColorIdx)) {
+        squadColorIdx[player] = Object.keys(squadColorIdx).length % SQUAD_COLORS.length;
+    }
+    var color = SQUAD_COLORS[squadColorIdx[player]];
+    var ll    = w2ll(pos.x, pos.z);
+    var yaw   = quatYawDeg(pos.qw, pos.qx, pos.qy, pos.qz);
+    var ico   = arrowIcon(color, yaw, 28);
 
     if (!squadMarkers[player]) {
-        squadMarkers[player] = L.marker(latlng, { icon: icon, zIndexOffset: 900 })
-            .bindTooltip(player, { permanent: true, direction: 'right', offset: [10, 0] })
+        squadMarkers[player] = L.marker(ll, { icon: ico, zIndexOffset: 900 })
+            .bindTooltip(player, { permanent: true, direction: 'right', offset: [12, 0] })
             .addTo(lg.players);
     } else {
-        squadMarkers[player].setLatLng(latlng);
-        squadMarkers[player].setIcon(icon);
+        squadMarkers[player].setLatLng(ll).setIcon(ico);
     }
 }
 
-// ── Map switching ─────────────────────────────────────────────────────────────
-
-var currentMapLoaded = null;
-
+// ---------------------------------------------------------------------------
+// Map switching - called when a new mapId is detected from position data
+// ---------------------------------------------------------------------------
 function switchMap(mapId) {
-    if (mapId === currentMapLoaded) return;
-    currentMapLoaded = mapId;
+    if (mapId === currentMap) return;
+    currentMap = mapId;
 
-    // Clear overlay layers
+    lg.base.clearLayers();
     lg.extracts.clearLayers();
     lg.bosses.clearLayers();
     lg.spawns.clearLayers();
     lg.quests.clearLayers();
-    lg.base.clearLayers();
-    // Keep player markers
 
-    noMapMsg.style.display = 'none';
+    var noMsg = document.getElementById('no-map-msg');
+    if (noMsg) noMsg.style.display = 'none';
 
-    var bounds = MAP_BOUNDS[mapId];
-    if (!bounds) {
-        bounds = { xMin:-500, xMax:500, zMin:-500, zMax:500 };
-    }
+    var b = MAP_BOUNDS[mapId] || { xMin: -500, xMax: 500, zMin: -500, zMax: 500 };
+    var sw = w2ll(b.xMin, b.zMin);
+    var ne = w2ll(b.xMax, b.zMax);
+    var lb = L.latLngBounds(sw, ne);
 
-    var sw = worldToLatLng(bounds.xMin, bounds.zMin);
-    var ne = worldToLatLng(bounds.xMax, bounds.zMax);
-    var leafletBounds = L.latLngBounds(sw, ne);
-
-    // Add background tile (dark gray placeholder)
-    L.rectangle(leafletBounds, {
-        color: '#1a1a1a',
-        fillColor: '#111',
-        fillOpacity: 1,
-        weight: 1,
-        opacity: 0.5
+    // Dark background
+    L.rectangle(lb, {
+        color: '#252525', fillColor: '#151515', fillOpacity: 1, weight: 1
     }).addTo(lg.base);
 
-    // Add grid lines for orientation
-    var step = Math.round((bounds.xMax - bounds.xMin) / 10);
-    for (var gx = bounds.xMin; gx <= bounds.xMax; gx += step) {
-        L.polyline([worldToLatLng(gx, bounds.zMin), worldToLatLng(gx, bounds.zMax)], {
-            color: '#1e1e1e', weight: 1, opacity: 0.6
-        }).addTo(lg.base);
-        L.marker(worldToLatLng(gx, bounds.zMin), {
-            icon: L.divIcon({ html: '<span style="color:#333;font-size:10px">' + gx + '</span>', className: '', iconAnchor:[0,0] })
-        }).addTo(lg.base);
+    // Subtle grid
+    var step = Math.round((b.xMax - b.xMin) / 8);
+    if (step < 1) step = 50;
+    for (var gx = Math.ceil(b.xMin / step) * step; gx <= b.xMax; gx += step) {
+        L.polyline([w2ll(gx, b.zMin), w2ll(gx, b.zMax)], { color: '#222', weight: 1 }).addTo(lg.base);
     }
-    for (var gz = bounds.zMin; gz <= bounds.zMax; gz += step) {
-        L.polyline([worldToLatLng(bounds.xMin, gz), worldToLatLng(bounds.xMax, gz)], {
-            color: '#1e1e1e', weight: 1, opacity: 0.6
-        }).addTo(lg.base);
-        L.marker(worldToLatLng(bounds.xMin, gz), {
-            icon: L.divIcon({ html: '<span style="color:#333;font-size:10px">' + gz + '</span>', className: '', iconAnchor:[0,0] })
-        }).addTo(lg.base);
+    for (var gz = Math.ceil(b.zMin / step) * step; gz <= b.zMax; gz += step) {
+        L.polyline([w2ll(b.xMin, gz), w2ll(b.xMax, gz)], { color: '#222', weight: 1 }).addTo(lg.base);
     }
 
-    // Fit map to bounds
-    map.fitBounds(leafletBounds, { padding: [20, 20] });
+    map.fitBounds(lb, { padding: [30, 30] });
 
-    // Load overlays from cached map data
-    if (state.mapData) {
-        loadMapOverlays(mapId);
-    }
-
-    // Update status bar
     document.getElementById('sb-map').textContent = 'Map: ' + (MAP_NAMES[mapId] || mapId);
+
+    if (mapData) loadOverlays(mapId);
 }
 
-// ── Map overlays from tarkov.dev data ─────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// tarkov.dev overlay rendering
+// ---------------------------------------------------------------------------
+function loadOverlays(mapId) {
+    if (!mapData || !mapData.data || !mapData.data.maps) return;
 
-function loadMapOverlays(mapId) {
-    if (!state.mapData || !state.mapData.data || !state.mapData.data.maps) return;
-
-    var mapInfo = null;
-    state.mapData.data.maps.forEach(function(m) {
-        if (m.normalizedName === mapId || m.name.toLowerCase() === mapId) {
-            mapInfo = m;
-        }
+    var info = null;
+    mapData.data.maps.forEach(function (m) {
+        if (m.normalizedName === mapId || (m.name && m.name.toLowerCase() === mapId)) info = m;
     });
-    if (!mapInfo) return;
+    if (!info) return;
 
-    // Extraction points
-    if (mapInfo.extracts && state.layers.extracts) {
-        mapInfo.extracts.forEach(function(ext) {
+    // Extractions
+    if (layerState.extracts && info.extracts) {
+        info.extracts.forEach(function (ext) {
             if (!ext.position) return;
-            var latlng = worldToLatLng(ext.position.x, ext.position.z);
-            var color  = FACTION_COLOR[ext.faction] || '#888';
-            var marker = L.circleMarker(latlng, {
-                radius: 7, color: color, fillColor: color, fillOpacity: 0.7, weight: 2
-            });
-            marker.bindTooltip(ext.name + ' [' + (ext.faction || '?') + ']', {
-                direction: 'top', offset: [0, -8]
-            });
-            if (state.layers.extracts) marker.addTo(lg.extracts);
+            var color = FACTION_COLOR[ext.faction] || '#888';
+            L.circleMarker(w2ll(ext.position.x, ext.position.z), {
+                radius: 7, color: color, fillColor: color, fillOpacity: 0.75, weight: 2
+            }).bindTooltip(ext.name + ' [' + (ext.faction || '?') + ']', { direction: 'top' })
+              .addTo(lg.extracts);
         });
     }
 
     // Boss spawns
-    if (mapInfo.bosses && state.layers.bosses) {
-        mapInfo.bosses.forEach(function(bossInfo) {
-            if (!bossInfo.boss) return;
-            var pct = Math.round((bossInfo.spawnChance || 0) * 100);
-            if (bossInfo.spawnLocations && bossInfo.spawnLocations.length > 0) {
-                bossInfo.spawnLocations.forEach(function(loc) {
-                    // spawnLocations have names, not positions in this API version
-                    // Place a text marker at approximate center
-                });
-            }
-            // Boss zone marker at map center as fallback (no position in this query)
-            var bounds = MAP_BOUNDS[mapId] || { xMin:-200, xMax:200, zMin:-200, zMax:200 };
-            var cx = (bounds.xMin + bounds.xMax) / 2 + (Math.random() - 0.5) * 50;
-            var cz = (bounds.zMin + bounds.zMax) / 2 + (Math.random() - 0.5) * 50;
-            var latlng = worldToLatLng(cx, cz);
-            var icon = L.divIcon({
-                html: '<div style="background:#cf4444;color:#fff;font-size:10px;padding:2px 5px;border-radius:3px;border:1px solid #ff6666;white-space:nowrap">' +
-                      bossInfo.boss.name + ' ' + pct + '%</div>',
-                className: '',
-                iconAnchor: [0, 0]
+    if (layerState.bosses && info.bosses) {
+        info.bosses.forEach(function (bi) {
+            if (!bi.boss) return;
+            var pct = Math.round((bi.spawnChance || 0) * 100);
+            var bnd = MAP_BOUNDS[mapId] || { xMin: -200, xMax: 200, zMin: -200, zMax: 200 };
+            // Distribute boss labels across map area so they don't all overlap
+            var seed = 0;
+            for (var ci = 0; ci < bi.boss.name.length; ci++) seed += bi.boss.name.charCodeAt(ci);
+            var cx = bnd.xMin + ((seed * 37) % (bnd.xMax - bnd.xMin));
+            var cz = bnd.zMin + ((seed * 53) % (bnd.zMax - bnd.zMin));
+            var ico = L.divIcon({
+                html: '<div class="boss-label">' + bi.boss.name + ' ' + pct + '%</div>',
+                className: '', iconAnchor: [0, 0]
             });
-            var m = L.marker(latlng, { icon: icon });
-            m.bindTooltip(bossInfo.boss.name + ' - spawn chance: ' + pct + '%', { direction: 'top' });
-            if (state.layers.bosses) m.addTo(lg.bosses);
+            L.marker(w2ll(cx, cz), { icon: ico })
+             .bindTooltip(bi.boss.name + ' - spawn chance: ' + pct + '%', { direction: 'top' })
+             .addTo(lg.bosses);
         });
     }
 
-    // Player spawn zones
-    if (mapInfo.spawns && state.layers.spawns) {
-        mapInfo.spawns.forEach(function(spawn) {
-            if (!spawn.position) return;
-            var latlng = worldToLatLng(spawn.position.x, spawn.position.z);
-            var sides  = (spawn.sides || []).join('/');
-            var color  = sides.includes('Pmc') ? '#4a9eff' : (sides.includes('Scav') ? '#5ecf5e' : '#555');
-            var marker = L.circleMarker(latlng, {
-                radius: 4, color: color, fillColor: color, fillOpacity: 0.5, weight: 1
-            });
-            marker.bindTooltip(sides || 'spawn', { direction: 'top', offset: [0, -5] });
-            if (state.layers.spawns) marker.addTo(lg.spawns);
+    // Player spawns
+    if (layerState.spawns && info.spawns) {
+        info.spawns.forEach(function (sp) {
+            if (!sp.position) return;
+            var sides = (sp.sides || []).join('/');
+            var color = (sides.indexOf('Pmc') >= 0) ? '#4a9eff'
+                      : (sides.indexOf('Scav') >= 0) ? '#5ecf5e'
+                      : '#444';
+            L.circleMarker(w2ll(sp.position.x, sp.position.z), {
+                radius: 3, color: color, fillColor: color, fillOpacity: 0.5, weight: 1
+            }).bindTooltip(sides || 'spawn', { direction: 'top' })
+              .addTo(lg.spawns);
         });
     }
 }
 
-// ── Layer toggles ─────────────────────────────────────────────────────────────
-
-function applyLayerVisibility() {
-    if (state.layers.extracts) {
-        if (!map.hasLayer(lg.extracts)) map.addLayer(lg.extracts);
-    } else {
-        map.removeLayer(lg.extracts);
-    }
-    if (state.layers.bosses) {
-        if (!map.hasLayer(lg.bosses)) map.addLayer(lg.bosses);
-    } else {
-        map.removeLayer(lg.bosses);
-    }
-    if (state.layers.spawns) {
-        if (!map.hasLayer(lg.spawns)) map.addLayer(lg.spawns);
-    } else {
-        map.removeLayer(lg.spawns);
-    }
-    if (state.layers.quests) {
-        if (!map.hasLayer(lg.quests)) map.addLayer(lg.quests);
-    } else {
-        map.removeLayer(lg.quests);
-    }
+// ---------------------------------------------------------------------------
+// Layer visibility toggles
+// ---------------------------------------------------------------------------
+function applyLayers() {
+    if (layerState.extracts) { if (!map.hasLayer(lg.extracts)) map.addLayer(lg.extracts); }
+    else map.removeLayer(lg.extracts);
+    if (layerState.bosses)   { if (!map.hasLayer(lg.bosses))   map.addLayer(lg.bosses);   }
+    else map.removeLayer(lg.bosses);
+    if (layerState.spawns)   { if (!map.hasLayer(lg.spawns))   map.addLayer(lg.spawns);   }
+    else map.removeLayer(lg.spawns);
+    if (layerState.quests)   { if (!map.hasLayer(lg.quests))   map.addLayer(lg.quests);   }
+    else map.removeLayer(lg.quests);
 }
 
-['extracts','bosses','spawns','quests'].forEach(function(layer) {
+['extracts', 'bosses', 'spawns', 'quests'].forEach(function (layer) {
     var cb = document.getElementById('layer-' + layer);
     if (!cb) return;
-    cb.checked = state.layers[layer];
-    cb.addEventListener('change', function() {
-        state.layers[layer] = cb.checked;
-        savePrefs();
-        applyLayerVisibility();
-        // Re-render overlays if map is loaded
-        if (currentMapLoaded && state.mapData) {
+    cb.checked = layerState[layer];
+    cb.addEventListener('change', function () {
+        layerState[layer] = cb.checked;
+        saveLayerPrefs();
+        applyLayers();
+        if (currentMap && mapData) {
             lg.extracts.clearLayers();
             lg.bosses.clearLayers();
             lg.spawns.clearLayers();
-            loadMapOverlays(currentMapLoaded);
+            loadOverlays(currentMap);
         }
     });
 });
 
-// ── Status bar updates ────────────────────────────────────────────────────────
-
-function updateStatusBar() {
+// ---------------------------------------------------------------------------
+// Status bar
+// ---------------------------------------------------------------------------
+function updateStatusBar(eftRunning, inRaid, sessionCount) {
     var eftEl = document.getElementById('sb-eft');
-    eftEl.textContent = 'EFT: ' + (state.eftRunning ? (state.inRaid ? 'In Raid' : 'In Menu') : 'Not Running');
-    eftEl.className   = state.eftRunning ? 'ok' : 'error';
-
-    document.getElementById('sb-shots').textContent = 'Shots: ' + state.sessionCount;
-}
-
-// ── SSE connection ─────────────────────────────────────────────────────────────
-
-var sseRetryDelay = 1000;
-var sseRetryMax   = 30000;
-var sseSource     = null;
-
-function connectSSE() {
-    var sseEl = document.getElementById('sb-sse');
-    sseEl.textContent = 'SSE: Connecting';
-    sseEl.className   = '';
-
-    if (sseSource) {
-        sseSource.close();
-        sseSource = null;
+    if (eftRunning === undefined) return;
+    if (eftRunning) {
+        eftEl.textContent = 'EFT: ' + (inRaid ? 'In Raid' : 'In Menu');
+        eftEl.className = 'ok';
+    } else {
+        eftEl.textContent = 'EFT: Not Running';
+        eftEl.className = 'error';
     }
-
-    sseSource = new EventSource('/events');
-
-    sseSource.onopen = function() {
-        sseEl.textContent = 'SSE: Connected';
-        sseEl.className   = 'ok';
-        sseRetryDelay     = 1000;
-    };
-
-    sseSource.onmessage = function(e) {
-        var msg;
-        try { msg = JSON.parse(e.data); } catch(err) { return; }
-        handleSSEMessage(msg);
-    };
-
-    sseSource.onerror = function() {
-        sseEl.textContent = 'SSE: Reconnecting...';
-        sseEl.className   = 'error';
-        sseSource.close();
-        sseSource = null;
-        setTimeout(connectSSE, sseRetryDelay);
-        sseRetryDelay = Math.min(sseRetryDelay * 2, sseRetryMax);
-    };
+    if (sessionCount !== undefined) {
+        document.getElementById('sb-shots').textContent = 'Shots: ' + sessionCount;
+    }
 }
 
-function handleSSEMessage(msg) {
+// ---------------------------------------------------------------------------
+// SSE message handler
+// ---------------------------------------------------------------------------
+function handleMsg(msg) {
     if (!msg || !msg.type) return;
 
     switch (msg.type) {
@@ -413,88 +316,104 @@ function handleSSEMessage(msg) {
             break;
 
         case 'status':
-            state.eftRunning   = msg.eftRunning;
-            state.inRaid       = msg.inRaid;
-            state.sessionCount = msg.sessionCount || state.sessionCount;
-            if (msg.map && msg.map !== 'unknown') {
-                state.currentMap = msg.map;
+            if (!myPlayerName && msg.playerName) {
+                myPlayerName = msg.playerName;
+                // Update tooltip on existing marker
+                if (myMarker) myMarker.setTooltipContent(myPlayerName);
             }
-            updateStatusBar();
+            updateStatusBar(msg.eftRunning, msg.inRaid, msg.sessionCount);
+            if (msg.map && msg.map !== 'unknown' && msg.map !== currentMap) {
+                switchMap(msg.map);
+            }
             break;
 
         case 'position':
-            var isMe = (msg.player === myPlayerName || !msg.player);
+            var isMe = !msg.player || msg.player === myPlayerName || myPlayerName === '';
             if (isMe) {
-                state.myPosition = msg;
                 if (msg.map && msg.map !== 'unknown') {
-                    if (msg.map !== currentMapLoaded) {
-                        switchMap(msg.map);
-                    }
+                    if (msg.map !== currentMap) switchMap(msg.map);
                     updateMyMarker(msg);
                 }
-                state.inRaid = true;
-                state.sessionCount++;
-                updateStatusBar();
+                updateStatusBar(true, true);
             } else {
-                // Squad member
-                var idx = Object.keys(state.squadPositions).indexOf(msg.player);
-                if (idx === -1) { idx = Object.keys(state.squadPositions).length; }
-                state.squadPositions[msg.player] = msg;
-                updateSquadMarker(msg.player, msg, idx);
+                if (msg.map && msg.map !== 'unknown' && msg.map !== currentMap) {
+                    switchMap(msg.map);
+                }
+                updateSquadMarker(msg.player, msg);
             }
             break;
     }
 }
 
-// ── Fetch map data ────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// SSE connection with exponential backoff
+// ---------------------------------------------------------------------------
+var sseSource    = null;
+var sseDelay     = 1000;
+var sseMaxDelay  = 30000;
 
-function fetchMapData() {
-    fetch('/api/mapdata')
-        .then(function(r) { return r.ok ? r.json() : null; })
-        .then(function(data) {
-            if (data && !data.error) {
-                state.mapData = data;
-                if (currentMapLoaded) {
-                    loadMapOverlays(currentMapLoaded);
-                }
-            }
-        })
-        .catch(function() {});
+function connectSSE() {
+    var el = document.getElementById('sb-sse');
+    el.textContent = 'SSE: Connecting';
+    el.className = '';
+
+    if (sseSource) { sseSource.close(); sseSource = null; }
+
+    sseSource = new EventSource('/events');
+
+    sseSource.onopen = function () {
+        el.textContent = 'SSE: Live';
+        el.className = 'ok';
+        sseDelay = 1000;
+    };
+
+    sseSource.onmessage = function (e) {
+        try { handleMsg(JSON.parse(e.data)); } catch (err) {}
+    };
+
+    sseSource.onerror = function () {
+        el.textContent = 'SSE: Reconnecting...';
+        el.className = 'error';
+        sseSource.close();
+        sseSource = null;
+        setTimeout(connectSSE, sseDelay);
+        sseDelay = Math.min(sseDelay * 2, sseMaxDelay);
+    };
 }
 
-// ── Player name from DOM or default ──────────────────────────────────────────
-var myPlayerName = '';
+// ---------------------------------------------------------------------------
+// Fetch map data from backend cache
+// ---------------------------------------------------------------------------
+function fetchMapData() {
+    fetch('/api/mapdata')
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+            if (!d || d.error) return;
+            mapData = d;
+            if (currentMap) {
+                lg.extracts.clearLayers();
+                lg.bosses.clearLayers();
+                lg.spawns.clearLayers();
+                loadOverlays(currentMap);
+            }
+        })
+        .catch(function () {});
+}
+
+// ---------------------------------------------------------------------------
+// Startup: fetch player name first, then connect SSE
+// ---------------------------------------------------------------------------
 fetch('/api/status')
-    .then(function(r) { return r.json(); })
-    .catch(function() { return {}; });
-
-// ── Init ──────────────────────────────────────────────────────────────────────
-
-// Set initial layer checkbox states from saved prefs
-['extracts','bosses','spawns','quests'].forEach(function(layer) {
-    var cb = document.getElementById('layer-' + layer);
-    if (cb) cb.checked = state.layers[layer];
-});
-
-// Start with no-map state
-map.setView([0, 0], 0);
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+        if (d && d.playerName) myPlayerName = d.playerName;
+        updateStatusBar(d.eftRunning, d.inRaid, d.sessionCount);
+        if (d.version) document.getElementById('sb-version').textContent = 'TarkovMetora v' + d.version;
+    })
+    .catch(function () {})
+    .then(function () { connectSSE(); });
 
 fetchMapData();
-// Refresh map data every 6 hours
 setInterval(fetchMapData, 6 * 3600 * 1000);
-
-connectSSE();
-updateStatusBar();
-
-// Refresh status every 30 seconds as fallback
-setInterval(function() {
-    fetch('/api/status')
-        .then(function(r) { return r.json(); })
-        .then(function(d) {
-            if (!d) return;
-            // Handled via SSE primarily; this is just a fallback
-        })
-        .catch(function() {});
-}, 30000);
 
 })();
